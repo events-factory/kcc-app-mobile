@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "kcc-app-mobile",
-    "slug": "kcc-app-mobile",
+    "name": "Qr Code Scanner",
+    "slug": "qr-code-scanner",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -24,6 +24,11 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "56153ac9-4980-4fde-b226-9cf67d854ea7"
+      }
     }
   }
 }
