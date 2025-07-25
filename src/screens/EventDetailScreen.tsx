@@ -7,177 +7,194 @@ import {
   StyleSheet,
   RefreshControl,
   Alert,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAuth } from '../context/AuthContext';
+import {
+  eventsApi,
+  attendeesApi,
+  statsApi,
+  entrancesApi,
+} from '../services/api';
 
-interface CheckInData {
-  id: string;
+interface Attendee {
+  id: number;
   name: string;
   email: string;
-  checkInTime: string;
-  ticketId: string;
-  entranceId?: string;
-  entranceName?: string;
+  registrationDate: string;
+  checkInTime?: string;
+  isCheckedIn: boolean;
+  eventId: number;
 }
 
 interface Entrance {
-  id: string;
+  id: number;
   name: string;
-  maxCapacity: string;
-  isActive: boolean;
+  maxCapacity: number;
+  eventId: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface EventStats {
+  totalRegistered: number;
+  totalCheckedIn: number;
+  checkInRate: number;
 }
 
 export default function EventDetailScreen({ route, navigation }: any) {
   const { event } = route.params;
-  const [checkIns, setCheckIns] = useState<CheckInData[]>([]);
-  const [filteredCheckIns, setFilteredCheckIns] = useState<CheckInData[]>([]);
-  const [selectedEntrance, setSelectedEntrance] = useState<Entrance | null>(
-    null
-  );
-  const [showEntranceSelector, setShowEntranceSelector] = useState(false);
-  const [entrances] = useState<Entrance[]>([
-    {
-      id: '5',
-      name: 'Filini',
-      maxCapacity: 'No limit',
-      isActive: true,
-    },
-    {
-      id: '6',
-      name: 'Main Hall Entrance',
-      maxCapacity: '500',
-      isActive: true,
-    },
-    {
-      id: '7',
-      name: 'VIP Entrance',
-      maxCapacity: '50',
-      isActive: true,
-    },
-    {
-      id: '8',
-      name: 'Staff Entrance',
-      maxCapacity: '100',
-      isActive: false,
-    },
-  ]);
+  const { accessToken } = useAuth();
+  const [attendees, setAttendees] = useState<Attendee[]>([]);
+  const [entrances, setEntrances] = useState<Entrance[]>([]);
+  const [eventStats, setEventStats] = useState<EventStats>({
+    totalRegistered: 0,
+    totalCheckedIn: 0,
+    checkInRate: 0,
+  });
   const [refreshing, setRefreshing] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [showEntranceModal, setShowEntranceModal] = useState(false);
 
   useEffect(() => {
-    loadCheckIns();
+    fetchEventData();
   }, []);
 
-  useEffect(() => {
-    filterCheckInsByEntrance();
-  }, [checkIns, selectedEntrance]);
-
-  const loadCheckIns = async () => {
-    try {
-      // Load all check-ins from AsyncStorage
-      const keys = await AsyncStorage.getAllKeys();
-      const checkInKeys = keys.filter((key) => key.startsWith('checkin_'));
-
-      if (checkInKeys.length > 0) {
-        const checkInData = await AsyncStorage.multiGet(checkInKeys);
-        const parsedCheckIns = checkInData
-          .map(([key, value]) => (value ? JSON.parse(value) : null))
-          .filter((item) => item && item.eventId === event.id);
-
-        setCheckIns(parsedCheckIns);
-      }
-    } catch (error) {
-      console.error('Error loading check-ins:', error);
-    }
-  };
-
-  const filterCheckInsByEntrance = () => {
-    if (!selectedEntrance) {
-      setFilteredCheckIns(checkIns);
-    } else {
-      const filtered = checkIns.filter(
-        (checkIn) => checkIn.entranceId === selectedEntrance.id
-      );
-      setFilteredCheckIns(filtered);
-    }
-  };
-
-  const selectEntrance = async (entrance: Entrance | null) => {
-    setSelectedEntrance(entrance);
-    if (entrance) {
-      // Save to AsyncStorage to sync with other screens
-      try {
-        await AsyncStorage.setItem(
-          'selectedEntrance',
-          JSON.stringify(entrance)
-        );
-      } catch (error) {
-        console.error('Error saving selected entrance:', error);
-      }
-    }
-  };
-
-  const clearEntrance = async () => {
-    try {
-      await AsyncStorage.removeItem('selectedEntrance');
-      setSelectedEntrance(null);
-      Alert.alert(
-        'Entrance Cleared',
-        'No entrance is currently selected for filtering.'
-      );
-    } catch (error) {
-      console.error('Error clearing selected entrance:', error);
-    }
-  };
-
-  const startScanning = () => {
-    if (!selectedEntrance) {
-      setShowEntranceSelector(true);
+  const fetchEventData = async () => {
+    if (!accessToken) {
+      console.error('No access token available');
+      Alert.alert('Authentication Error', 'Please login again to continue.');
+      navigation.navigate('Login');
       return;
     }
-    navigation.navigate('Scanner');
-  };
 
-  const handleEntranceSelection = async (entrance: Entrance) => {
-    await selectEntrance(entrance);
-    setShowEntranceSelector(false);
-    // Save the current event to AsyncStorage as well
     try {
-      await AsyncStorage.setItem('selectedEvent', JSON.stringify(event));
-    } catch (error) {
-      console.error('Error saving selected event:', error);
+      setLoading(true);
+
+      // Try to fetch data with fallback for individual API calls
+      let attendeesData = [];
+      let statsData = { totalRegistered: 0, totalCheckedIn: 0, checkInRate: 0 };
+      let entrancesData = [];
+
+      try {
+        // Try parallel fetch first
+        const [attendeesResponse, statsResponse, entrancesResponse] =
+          await Promise.all([
+            attendeesApi.getByEvent(event.id, accessToken),
+            statsApi.getEventStats(event.id, accessToken),
+            entrancesApi.getByEvent(event.id, accessToken),
+          ]);
+
+        attendeesData = attendeesResponse;
+        statsData = statsResponse;
+        entrancesData = entrancesResponse;
+      } catch (parallelError: any) {
+        console.warn(
+          'Parallel fetch failed, trying individual calls:',
+          parallelError.message
+        );
+
+        // Try individual calls to identify which one is failing
+        try {
+          attendeesData = await attendeesApi.getByEvent(event.id, accessToken);
+        } catch (attendeesError: any) {
+          console.error('Attendees API failed:', attendeesError.message);
+          attendeesData = [];
+        }
+
+        try {
+          statsData = await statsApi.getEventStats(event.id, accessToken);
+        } catch (statsError: any) {
+          console.error('Stats API failed:', statsError.message);
+          statsData = { totalRegistered: 0, totalCheckedIn: 0, checkInRate: 0 };
+        }
+
+        try {
+          entrancesData = await entrancesApi.getByEvent(event.id, accessToken);
+        } catch (entrancesError: any) {
+          console.error('Entrances API failed:', entrancesError.message);
+          entrancesData = [];
+        }
+      }
+
+      // Calculate capacity percentage instead of check-in rate against registered attendees
+      const capacityPercentage =
+        event.attendeeLimit > 0
+          ? (statsData.totalCheckedIn / event.attendeeLimit) * 100
+          : 0;
+
+      setAttendees(attendeesData);
+      setEventStats({
+        ...statsData,
+        checkInRate: capacityPercentage,
+      });
+      setEntrances(entrancesData);
+    } catch (error: any) {
+      console.error('Error fetching event data:', error);
+
+      if (
+        error.message?.includes('Unauthorized') ||
+        error.message?.includes('401')
+      ) {
+        Alert.alert(
+          'Authentication Error',
+          'Your session has expired. Please login again.',
+          [
+            {
+              text: 'OK',
+              onPress: () => navigation.navigate('Login'),
+            },
+          ]
+        );
+      } else {
+        Alert.alert(
+          'Error',
+          `Failed to load event data: ${error.message || 'Please try again.'}`
+        );
+      }
+    } finally {
+      setLoading(false);
     }
-    navigation.navigate('Scanner');
   };
 
   const onRefresh = () => {
     setRefreshing(true);
-    loadCheckIns().finally(() => setRefreshing(false));
-  };
-
-  const formatTime = (timeString: string) => {
-    const date = new Date(timeString);
-    return date.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true,
+    fetchEventData().finally(() => {
+      setRefreshing(false);
     });
   };
 
-  const formatDate = (timeString: string) => {
-    const date = new Date(timeString);
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
+  const startScanning = () => {
+    if (entrances.length === 0) {
+      Alert.alert(
+        'No Entrances Available',
+        'No entrances have been configured for this event. Please add entrances first.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    if (entrances.length === 1) {
+      // If only one entrance, go directly to scanner
+      navigation.navigate('Scanner', {
+        entrance: entrances[0],
+        event: event,
+      });
+    } else {
+      // If multiple entrances, show selection modal
+      setShowEntranceModal(true);
+    }
   };
 
-  const checkInRate =
-    event.registered > 0
-      ? Math.round((checkIns.length / event.registered) * 100)
-      : 0;
+  const selectEntrance = (entrance: Entrance) => {
+    setShowEntranceModal(false);
+    navigation.navigate('Scanner', {
+      entrance: entrance,
+      event: event,
+    });
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -190,285 +207,277 @@ export default function EventDetailScreen({ route, navigation }: any) {
         {/* Event Header */}
         <View style={styles.header}>
           <Text style={styles.eventTitle}>{event.name}</Text>
-          <Text style={styles.eventSubtitle}>Event Details & Check-ins</Text>
+          <Text style={styles.eventSubtitle}>Event Details & Attendees</Text>
+          {event.description && (
+            <Text style={styles.eventDescription}>{event.description}</Text>
+          )}
         </View>
+
+        {/* Loading State */}
+        {loading && (
+          <View style={styles.loadingContainer}>
+            <Text style={styles.loadingText}>Loading event data...</Text>
+          </View>
+        )}
 
         {/* Stats Cards */}
-        <View style={styles.statsContainer}>
-          <View style={styles.statCard}>
-            <View style={styles.statIconContainer}>
-              <Ionicons name="people-outline" size={24} color="#2563EB" />
-            </View>
-            <Text style={styles.statNumber}>{event.registered}</Text>
-            <Text style={styles.statLabel}>Total Attendees</Text>
-          </View>
-
-          <View style={styles.statCard}>
-            <View
-              style={[styles.statIconContainer, { backgroundColor: '#DCFCE7' }]}
-            >
-              <Ionicons
-                name="checkmark-circle-outline"
-                size={24}
-                color="#16A34A"
-              />
-            </View>
-            <Text style={styles.statNumber}>{checkIns.length}</Text>
-            <Text style={styles.statLabel}>Checked In</Text>
-          </View>
-
-          <View style={styles.statCard}>
-            <View
-              style={[styles.statIconContainer, { backgroundColor: '#FEF3C7' }]}
-            >
-              <Ionicons name="analytics-outline" size={24} color="#D97706" />
-            </View>
-            <Text style={styles.statNumber}>{checkInRate}%</Text>
-            <Text style={styles.statLabel}>Check-in Rate</Text>
-          </View>
-        </View>
-
-        {/* Quick Actions */}
-        <View style={styles.actionsContainer}>
-          <TouchableOpacity style={styles.actionButton} onPress={startScanning}>
-            <Ionicons name="qr-code-outline" size={20} color="white" />
-            <Text style={styles.actionButtonText}>Start Scanning</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.actionButton, styles.secondaryActionButton]}
-            onPress={onRefresh}
-          >
-            <Ionicons name="refresh-outline" size={20} color="#2563EB" />
-            <Text
-              style={[
-                styles.actionButtonText,
-                styles.secondaryActionButtonText,
-              ]}
-            >
-              Refresh
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Entrance Selector Modal */}
-        {showEntranceSelector && (
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContainer}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Select Entrance</Text>
-                <TouchableOpacity
-                  onPress={() => setShowEntranceSelector(false)}
-                  style={styles.modalCloseButton}
-                >
-                  <Ionicons name="close" size={24} color="#6B7280" />
-                </TouchableOpacity>
+        {!loading && (
+          <View style={styles.statsContainer}>
+            <View style={styles.statCard}>
+              <View style={styles.statIconContainer}>
+                <Ionicons name="people-outline" size={24} color="#2563EB" />
               </View>
-
-              <Text style={styles.modalSubtitle}>
-                Choose an entrance to start scanning
+              <Text style={styles.statNumber}>
+                {eventStats.totalRegistered}
               </Text>
+              <Text style={styles.statLabel}>Total Attendees</Text>
+            </View>
 
-              <ScrollView style={styles.entranceList}>
-                {entrances
-                  .filter((entrance) => entrance.isActive)
-                  .map((entrance) => (
-                    <TouchableOpacity
-                      key={entrance.id}
-                      style={styles.entranceOption}
-                      onPress={() => handleEntranceSelection(entrance)}
-                    >
-                      <View style={styles.entranceOptionContent}>
-                        <View style={styles.entranceInfo}>
-                          <Text style={styles.entranceName}>
-                            {entrance.name}
-                          </Text>
-                          <Text style={styles.entranceCapacity}>
-                            Capacity: {entrance.maxCapacity}
-                          </Text>
-                        </View>
-                        <Ionicons
-                          name="chevron-forward"
-                          size={20}
-                          color="#6B7280"
-                        />
-                      </View>
-                    </TouchableOpacity>
-                  ))}
-              </ScrollView>
+            <View style={styles.statCard}>
+              <View
+                style={[
+                  styles.statIconContainer,
+                  { backgroundColor: '#DCFCE7' },
+                ]}
+              >
+                <Ionicons
+                  name="checkmark-circle-outline"
+                  size={24}
+                  color="#16A34A"
+                />
+              </View>
+              <Text style={styles.statNumber}>{eventStats.totalCheckedIn}</Text>
+              <Text style={styles.statLabel}>Checked In</Text>
+            </View>
+
+            <View style={styles.statCard}>
+              <View
+                style={[
+                  styles.statIconContainer,
+                  { backgroundColor: '#FEF3C7' },
+                ]}
+              >
+                <Ionicons name="analytics-outline" size={24} color="#D97706" />
+              </View>
+              <Text style={styles.statNumber}>
+                {Math.round(eventStats.checkInRate)}%
+              </Text>
+              <Text style={styles.statLabel}>Capacity Filled</Text>
             </View>
           </View>
         )}
 
-        {/* Entrance Filter */}
-        <View style={styles.entranceFilterContainer}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Filter by Entrance</Text>
-            {selectedEntrance && (
-              <TouchableOpacity
-                onPress={clearEntrance}
-                style={styles.clearFilterButton}
-              >
-                <Text style={styles.clearFilterText}>Clear Filter</Text>
-              </TouchableOpacity>
-            )}
+        {/* Event Details */}
+        {!loading && (
+          <View style={styles.eventDetailsContainer}>
+            <Text style={styles.sectionTitle}>Event Information</Text>
+            <View style={styles.eventDetailsCard}>
+              <View style={styles.eventDetailRow}>
+                <Ionicons name="people-outline" size={16} color="#6B7280" />
+                <Text style={styles.eventDetailLabel}>Capacity:</Text>
+                <Text style={styles.eventDetailValue}>
+                  {event.attendeeLimit}
+                </Text>
+              </View>
+            </View>
           </View>
+        )}
 
-          <View style={styles.entranceFilterOptions}>
+        {/* Quick Actions */}
+        {!loading && (
+          <View style={styles.actionsContainer}>
             <TouchableOpacity
               style={[
-                styles.entranceFilterOption,
-                !selectedEntrance && styles.entranceFilterOptionActive,
+                styles.actionButton,
+                entrances.length === 0 && styles.disabledButton,
               ]}
-              onPress={() => selectEntrance(null)}
+              onPress={startScanning}
+              disabled={entrances.length === 0}
             >
-              <Text
-                style={[
-                  styles.entranceFilterOptionText,
-                  !selectedEntrance && styles.entranceFilterOptionTextActive,
-                ]}
-              >
-                All Entrances
+              <Ionicons name="qr-code-outline" size={20} color="white" />
+              <Text style={styles.actionButtonText}>
+                {entrances.length === 0
+                  ? 'No Entrances'
+                  : entrances.length === 1
+                  ? 'Start Scanning'
+                  : 'Select Entrance'}
               </Text>
             </TouchableOpacity>
 
-            {entrances
-              .filter((entrance) => entrance.isActive)
-              .map((entrance) => (
-                <TouchableOpacity
-                  key={entrance.id}
-                  style={[
-                    styles.entranceFilterOption,
-                    selectedEntrance?.id === entrance.id &&
-                      styles.entranceFilterOptionActive,
-                  ]}
-                  onPress={() => selectEntrance(entrance)}
-                >
-                  <Text
-                    style={[
-                      styles.entranceFilterOptionText,
-                      selectedEntrance?.id === entrance.id &&
-                        styles.entranceFilterOptionTextActive,
-                    ]}
-                  >
-                    {entrance.name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-          </View>
-        </View>
-
-        {/* Recent Check-ins */}
-        <View style={styles.checkInsContainer}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Recent Check-ins</Text>
-            {filteredCheckIns.length > 0 && (
-              <Text style={styles.sectionSubtitle}>
-                {filteredCheckIns.length}
-                {selectedEntrance
-                  ? ` at ${selectedEntrance.name}`
-                  : ` of ${event.registered} attendees`}
-              </Text>
-            )}
-          </View>
-
-          {filteredCheckIns.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Ionicons name="scan-outline" size={48} color="#9CA3AF" />
-              <Text style={styles.emptyStateTitle}>
-                {checkIns.length === 0
-                  ? 'No check-ins yet'
-                  : 'No check-ins for this entrance'}
-              </Text>
-              <Text style={styles.emptyStateText}>
-                {checkIns.length === 0
-                  ? 'Start scanning QR codes to see attendee check-ins here'
-                  : selectedEntrance
-                  ? `No attendees have checked in at ${selectedEntrance.name} yet`
-                  : 'Try selecting a different entrance filter'}
-              </Text>
-              <TouchableOpacity
-                style={styles.emptyStateButton}
-                onPress={startScanning}
+            <TouchableOpacity
+              style={[styles.actionButton, styles.secondaryActionButton]}
+              onPress={onRefresh}
+            >
+              <Ionicons name="refresh-outline" size={20} color="#2563EB" />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  styles.secondaryActionButtonText,
+                ]}
               >
-                <Text style={styles.emptyStateButtonText}>Start Scanning</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <View style={styles.checkInsList}>
-              {filteredCheckIns.map((checkIn, index) => (
-                <View key={checkIn.id} style={styles.checkInItem}>
-                  <View style={styles.checkInIcon}>
-                    <Ionicons
-                      name="person-circle-outline"
-                      size={40}
-                      color="#6B7280"
-                    />
-                  </View>
+                Refresh
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
-                  <View style={styles.checkInInfo}>
-                    <Text style={styles.checkInName}>{checkIn.name}</Text>
-                    <Text style={styles.checkInEmail}>{checkIn.email}</Text>
-                    <Text style={styles.checkInTicket}>
-                      Ticket: {checkIn.ticketId}
-                    </Text>
-                    {checkIn.entranceName && (
-                      <Text style={styles.checkInEntrance}>
-                        Entrance: {checkIn.entranceName}
+        {/* Attendees List */}
+        {!loading && (
+          <View style={styles.attendeesContainer}>
+            <Text style={styles.sectionTitle}>
+              Attendees ({eventStats.totalRegistered})
+            </Text>
+
+            {attendees.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="people-outline" size={48} color="#9CA3AF" />
+                <Text style={styles.emptyStateText}>No attendees yet</Text>
+                <Text style={styles.emptyStateSubtext}>
+                  Attendees will appear here when they register
+                </Text>
+              </View>
+            ) : (
+              attendees.map((attendee) => (
+                <View key={attendee.id} style={styles.attendeeCard}>
+                  <View style={styles.attendeeInfo}>
+                    <View style={styles.attendeeHeader}>
+                      <Text style={styles.attendeeName}>{attendee.name}</Text>
+                      {attendee.isCheckedIn && (
+                        <View style={styles.checkedInBadge}>
+                          <Ionicons name="checkmark" size={12} color="white" />
+                          <Text style={styles.checkedInText}>Checked In</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={styles.attendeeEmail}>{attendee.email}</Text>
+                    <View style={styles.attendeeDetails}>
+                      <Text style={styles.attendeeDetailText}>
+                        Registered:{' '}
+                        {new Date(
+                          attendee.registrationDate
+                        ).toLocaleDateString()}
                       </Text>
-                    )}
-                  </View>
-
-                  <View style={styles.checkInTime}>
-                    <Text style={styles.timeText}>
-                      {formatTime(checkIn.checkInTime)}
-                    </Text>
-                    <Text style={styles.dateText}>
-                      {formatDate(checkIn.checkInTime)}
-                    </Text>
-                    <View style={styles.statusBadge}>
-                      <Ionicons name="checkmark" size={12} color="white" />
+                      {attendee.checkInTime && (
+                        <Text style={styles.attendeeDetailText}>
+                          Checked in:{' '}
+                          {new Date(attendee.checkInTime).toLocaleString()}
+                        </Text>
+                      )}
                     </View>
                   </View>
                 </View>
+              ))
+            )}
+          </View>
+        )}
+
+        {/* Entrances List */}
+        {!loading && (
+          <View style={styles.entrancesContainer}>
+            <Text style={styles.sectionTitle}>
+              Entrances ({entrances.length})
+            </Text>
+
+            {entrances.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="enter-outline" size={48} color="#9CA3AF" />
+                <Text style={styles.emptyStateText}>
+                  No entrances configured
+                </Text>
+                <Text style={styles.emptyStateSubtext}>
+                  Entrances will appear here when they are created
+                </Text>
+              </View>
+            ) : (
+              entrances.map((entrance) => (
+                <View key={entrance.id} style={styles.entranceCard}>
+                  <View style={styles.entranceInfo}>
+                    <View style={styles.entranceHeader}>
+                      <Text style={styles.entranceName}>{entrance.name}</Text>
+                      <View style={styles.capacityBadge}>
+                        <Ionicons name="people" size={12} color="#2563EB" />
+                        <Text style={styles.capacityText}>
+                          Max: {entrance.maxCapacity}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.entranceDetails}>
+                      <Text style={styles.entranceDetailText}>
+                        Created:{' '}
+                        {new Date(entrance.createdAt).toLocaleDateString()}
+                      </Text>
+                      <Text style={styles.entranceDetailText}>
+                        ID: {entrance.id}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
+        )}
+      </ScrollView>
+
+      {/* Entrance Selection Modal */}
+      <Modal
+        visible={showEntranceModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowEntranceModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Select Entrance</Text>
+              <TouchableOpacity
+                onPress={() => setShowEntranceModal(false)}
+                style={styles.closeButton}
+              >
+                <Ionicons name="close" size={24} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalSubtitle}>
+              Choose an entrance to start scanning for check-ins
+            </Text>
+
+            <ScrollView style={styles.entranceList}>
+              {entrances.map((entrance) => (
+                <TouchableOpacity
+                  key={entrance.id}
+                  style={styles.entranceOption}
+                  onPress={() => selectEntrance(entrance)}
+                >
+                  <View style={styles.entranceOptionContent}>
+                    <View style={styles.entranceOptionHeader}>
+                      <Text style={styles.entranceOptionName}>
+                        {entrance.name}
+                      </Text>
+                      <View style={styles.entranceOptionCapacity}>
+                        <Ionicons name="people" size={16} color="#2563EB" />
+                        <Text style={styles.entranceOptionCapacityText}>
+                          {entrance.maxCapacity}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.entranceOptionId}>
+                      Entrance ID: {entrance.id}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color="#6B7280" />
+                </TouchableOpacity>
               ))}
-            </View>
-          )}
-        </View>
+            </ScrollView>
 
-        {/* Event Info */}
-        <View style={styles.eventInfoContainer}>
-          <Text style={styles.sectionTitle}>Event Information</Text>
-
-          <View style={styles.infoGrid}>
-            <View style={styles.infoItem}>
-              <Text style={styles.infoLabel}>Event ID</Text>
-              <Text style={styles.infoValue}>{event.id}</Text>
-            </View>
-
-            <View style={styles.infoItem}>
-              <Text style={styles.infoLabel}>Capacity</Text>
-              <Text style={styles.infoValue}>
-                {event.attendeeLimit
-                  ? `${event.attendeeLimit} people`
-                  : 'Unlimited'}
-              </Text>
-            </View>
-
-            <View style={styles.infoItem}>
-              <Text style={styles.infoLabel}>Registration Status</Text>
-              <Text style={styles.infoValue}>Open</Text>
-            </View>
-
-            <View style={styles.infoItem}>
-              <Text style={styles.infoLabel}>Check-in Status</Text>
-              <Text style={[styles.infoValue, { color: '#16A34A' }]}>
-                Active
-              </Text>
-            </View>
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={() => setShowEntranceModal(false)}
+            >
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
           </View>
         </View>
-      </ScrollView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -483,8 +492,9 @@ const styles = StyleSheet.create({
   },
   header: {
     backgroundColor: '#1D4ED8',
-    padding: 20,
-    paddingBottom: 30,
+    paddingHorizontal: 16,
+    paddingVertical: 24,
+    marginBottom: 24,
   },
   eventTitle: {
     color: 'white',
@@ -495,12 +505,26 @@ const styles = StyleSheet.create({
   eventSubtitle: {
     color: '#BFDBFE',
     fontSize: 16,
+    marginBottom: 8,
+  },
+  eventDescription: {
+    color: '#E0E7FF',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  loadingContainer: {
+    padding: 32,
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#6B7280',
+    fontSize: 16,
   },
   statsContainer: {
     flexDirection: 'row',
-    paddingHorizontal: 16,
-    paddingVertical: 20,
-    gap: 12,
+    marginHorizontal: 16,
+    marginBottom: 24,
+    justifyContent: 'space-between',
   },
   statCard: {
     flex: 1,
@@ -508,6 +532,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 16,
     alignItems: 'center',
+    marginHorizontal: 4,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
@@ -518,7 +543,7 @@ const styles = StyleSheet.create({
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: '#DBEAFE',
+    backgroundColor: '#EFF6FF',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 12,
@@ -534,10 +559,48 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     textAlign: 'center',
   },
+  eventDetailsContainer: {
+    marginHorizontal: 16,
+    marginBottom: 24,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#111827',
+    marginBottom: 12,
+  },
+  eventDetailsCard: {
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  eventDetailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  eventDetailLabel: {
+    fontSize: 14,
+    color: '#6B7280',
+    marginLeft: 8,
+    marginRight: 8,
+    flex: 1,
+  },
+  eventDetailValue: {
+    fontSize: 14,
+    color: '#111827',
+    fontWeight: '500',
+    flex: 2,
+  },
   actionsContainer: {
     flexDirection: 'row',
-    paddingHorizontal: 16,
-    paddingBottom: 20,
+    marginHorizontal: 16,
+    marginBottom: 24,
     gap: 12,
   },
   actionButton: {
@@ -549,184 +612,186 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  disabledButton: {
+    backgroundColor: '#9CA3AF',
+    opacity: 0.6,
+  },
+  actionButtonText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 16,
+    marginLeft: 8,
+  },
   secondaryActionButton: {
     backgroundColor: 'white',
     borderWidth: 1,
     borderColor: '#2563EB',
   },
-  actionButtonText: {
-    color: 'white',
-    fontWeight: '600',
-    marginLeft: 8,
-  },
   secondaryActionButtonText: {
     color: '#2563EB',
   },
-  checkInsContainer: {
-    paddingHorizontal: 16,
-    paddingBottom: 20,
+  attendeesContainer: {
+    marginHorizontal: 16,
+    marginBottom: 24,
   },
-  sectionHeader: {
-    marginBottom: 16,
-  },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#111827',
-    marginBottom: 4,
-  },
-  sectionSubtitle: {
-    fontSize: 14,
-    color: '#6B7280',
+  entrancesContainer: {
+    marginHorizontal: 16,
+    marginBottom: 24,
   },
   emptyState: {
+    padding: 32,
+    alignItems: 'center',
     backgroundColor: 'white',
     borderRadius: 12,
-    padding: 40,
-    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
-  emptyStateTitle: {
+  emptyStateText: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#111827',
+    color: '#374151',
     marginTop: 16,
     marginBottom: 8,
   },
-  emptyStateText: {
+  emptyStateSubtext: {
     fontSize: 14,
     color: '#6B7280',
     textAlign: 'center',
-    marginBottom: 20,
   },
-  emptyStateButton: {
-    backgroundColor: '#2563EB',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  emptyStateButtonText: {
-    color: 'white',
-    fontWeight: '600',
-  },
-  checkInsList: {
+  attendeeCard: {
     backgroundColor: 'white',
     borderRadius: 12,
-    overflow: 'hidden',
-  },
-  checkInItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
     padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
-  checkInIcon: {
-    marginRight: 12,
+  entranceCard: {
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
-  checkInInfo: {
+  attendeeInfo: {
     flex: 1,
   },
-  checkInName: {
+  entranceInfo: {
+    flex: 1,
+  },
+  attendeeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  entranceHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  attendeeName: {
     fontSize: 16,
     fontWeight: '600',
     color: '#111827',
-    marginBottom: 2,
+    flex: 1,
   },
-  checkInEmail: {
-    fontSize: 14,
-    color: '#6B7280',
-    marginBottom: 2,
-  },
-  checkInTicket: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    fontFamily: 'monospace',
-  },
-  checkInTime: {
-    alignItems: 'flex-end',
-  },
-  timeText: {
-    fontSize: 14,
+  entranceName: {
+    fontSize: 16,
     fontWeight: '600',
     color: '#111827',
+    flex: 1,
   },
-  dateText: {
-    fontSize: 12,
-    color: '#6B7280',
-    marginTop: 2,
-  },
-  statusBadge: {
-    backgroundColor: '#16A34A',
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 4,
-  },
-  eventInfoContainer: {
-    paddingHorizontal: 16,
-    paddingBottom: 20,
-  },
-  infoGrid: {
-    backgroundColor: 'white',
-    borderRadius: 12,
-    padding: 16,
-  },
-  infoItem: {
+  checkedInBadge: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
+    backgroundColor: '#10B981',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
-  infoLabel: {
+  capacityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  checkedInText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '500',
+    marginLeft: 4,
+  },
+  capacityText: {
+    color: '#2563EB',
+    fontSize: 12,
+    fontWeight: '500',
+    marginLeft: 4,
+  },
+  attendeeEmail: {
     fontSize: 14,
     color: '#6B7280',
+    marginBottom: 8,
   },
-  infoValue: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#111827',
+  attendeeDetails: {
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+    paddingTop: 8,
   },
-  checkInEntrance: {
+  entranceDetails: {
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+    paddingTop: 8,
+  },
+  attendeeDetailText: {
     fontSize: 12,
-    color: '#F59E0B',
-    marginTop: 2,
-    fontWeight: '500',
+    color: '#9CA3AF',
+    marginBottom: 2,
   },
+  entranceDetailText: {
+    fontSize: 12,
+    color: '#9CA3AF',
+    marginBottom: 2,
+  },
+  // Modal Styles
   modalOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 1000,
+    justifyContent: 'flex-end',
   },
-  modalContainer: {
+  modalContent: {
     backgroundColor: 'white',
-    borderRadius: 16,
-    padding: 20,
-    margin: 20,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
     maxHeight: '80%',
-    width: '90%',
+    paddingHorizontal: 16,
+    paddingVertical: 20,
   },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 16,
   },
   modalTitle: {
     fontSize: 20,
     fontWeight: 'bold',
     color: '#111827',
   },
-  modalCloseButton: {
+  closeButton: {
     padding: 4,
   },
   modalSubtitle: {
@@ -736,74 +801,60 @@ const styles = StyleSheet.create({
   },
   entranceList: {
     maxHeight: 300,
+    marginBottom: 20,
   },
   entranceOption: {
-    backgroundColor: '#F9FAFB',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'white',
     borderRadius: 12,
+    padding: 16,
     marginBottom: 12,
     borderWidth: 1,
     borderColor: '#E5E7EB',
   },
   entranceOptionContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-  },
-  entranceInfo: {
     flex: 1,
   },
-  entranceName: {
+  entranceOptionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  entranceOptionName: {
     fontSize: 16,
     fontWeight: '600',
     color: '#111827',
-    marginBottom: 4,
+    flex: 1,
   },
-  entranceCapacity: {
-    fontSize: 14,
-    color: '#6B7280',
+  entranceOptionCapacity: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
-  entranceFilterContainer: {
-    paddingHorizontal: 16,
-    paddingBottom: 20,
-  },
-  clearFilterButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: '#FEF2F2',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#FECACA',
-  },
-  clearFilterText: {
-    color: '#EF4444',
+  entranceOptionCapacityText: {
+    color: '#2563EB',
     fontSize: 12,
     fontWeight: '500',
+    marginLeft: 4,
   },
-  entranceFilterOptions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 12,
+  entranceOptionId: {
+    fontSize: 12,
+    color: '#9CA3AF',
   },
-  entranceFilterOption: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+  cancelButton: {
     backgroundColor: '#F3F4F6',
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
   },
-  entranceFilterOptionActive: {
-    backgroundColor: '#2563EB',
-    borderColor: '#2563EB',
-  },
-  entranceFilterOptionText: {
-    fontSize: 14,
-    color: '#6B7280',
-    fontWeight: '500',
-  },
-  entranceFilterOptionTextActive: {
-    color: 'white',
+  cancelButtonText: {
+    color: '#374151',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,9 +9,16 @@ import {
   Vibration,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import {
+  CameraView,
+  BarcodeScanningResult,
+  CameraType,
+  useCameraPermissions,
+} from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAuth } from '../context/AuthContext';
+import { attendeesApi } from '../services/api';
 
 interface AttendeeData {
   id: string;
@@ -23,9 +30,11 @@ interface AttendeeData {
   checkInTime?: string;
 }
 
-export default function ScannerScreen({ navigation }: any) {
+export default function ScannerScreen({ navigation, route }: any) {
+  const { accessToken } = useAuth();
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
+  const [processing, setProcessing] = useState(false);
   const [flashOn, setFlashOn] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
   const [selectedEntrance, setSelectedEntrance] = useState<any>(null);
@@ -33,13 +42,28 @@ export default function ScannerScreen({ navigation }: any) {
   const [scanResult, setScanResult] = useState<AttendeeData | null>(null);
   const [isError, setIsError] = useState(false);
   const [previousEntrance, setPreviousEntrance] = useState<string | null>(null);
+  const [lastScannedCode, setLastScannedCode] = useState<string | null>(null);
+  const [scanCooldown, setScanCooldown] = useState(false);
+  const scanningRef = useRef(false);
 
   useEffect(() => {
-    loadSelectedEvent();
-    loadSelectedEntrance();
-  }, []);
+    // Check if event and entrance are passed through route params first
+    const { event, entrance } = route.params || {};
+
+    if (event && entrance) {
+      setSelectedEvent(event);
+      setSelectedEntrance(entrance);
+    } else {
+      // Fallback to AsyncStorage if not passed through route params
+      loadSelectedEvent();
+      loadSelectedEntrance();
+    }
+  }, [route.params]);
 
   const loadSelectedEvent = async () => {
+    // Skip if event is already loaded from route params
+    if (selectedEvent) return;
+
     try {
       const eventData = await AsyncStorage.getItem('selectedEvent');
       if (eventData) {
@@ -55,6 +79,9 @@ export default function ScannerScreen({ navigation }: any) {
   };
 
   const loadSelectedEntrance = async () => {
+    // Skip if entrance is already loaded from route params
+    if (selectedEntrance) return;
+
     try {
       const entranceData = await AsyncStorage.getItem('selectedEntrance');
       if (entranceData) {
@@ -78,140 +105,148 @@ export default function ScannerScreen({ navigation }: any) {
     type: string;
     data: string;
   }) => {
+    // Immediate ref-based check to prevent rapid multiple scans
+    if (scanningRef.current) {
+      return;
+    }
+
+    // Prevent duplicate scans of the same QR code
+    if (
+      scanned ||
+      processing ||
+      data === lastScannedCode ||
+      showResult ||
+      scanCooldown
+    ) {
+      return;
+    }
+
+    // Set ref immediately to block subsequent scans
+    scanningRef.current = true;
+
     setScanned(true);
+    setProcessing(true);
+    setLastScannedCode(data);
+    setScanCooldown(true);
     Vibration.vibrate(100);
 
+    // Clear cooldown after 1 second to prevent rapid multiple scans
+    setTimeout(() => {
+      setScanCooldown(false);
+    }, 1000);
+
     try {
-      // Parse QR code data - expecting JSON format
-      const qrData = JSON.parse(data);
+      // The QR code data should contain the badgeId
+      let badgeId: string;
 
-      // Simulate checking if attendee is registered for this event
-      const mockAttendee: AttendeeData = {
-        id:
-          qrData.attendeeId || 'att_' + Math.random().toString(36).substr(2, 9),
-        name: qrData.name || 'John Doe',
-        email: qrData.email || 'john.doe@example.com',
-        ticketId:
-          qrData.ticketId || 'tick_' + Math.random().toString(36).substr(2, 9),
-        eventId: selectedEvent?.id || '1',
-        isCheckedIn: false,
-        checkInTime: new Date().toISOString(),
-      };
+      try {
+        // Try to parse as JSON first (in case it's a JSON object with badgeId)
+        const qrData = JSON.parse(data);
+        badgeId = qrData.badgeId || qrData.id || data;
+      } catch {
+        // If not JSON, treat the entire data as badgeId
+        badgeId = data.trim();
+      }
 
-      // Automatically check in the attendee
-      await performCheckIn(mockAttendee);
-    } catch (error) {
-      // Handle invalid QR code
+      if (!badgeId) {
+        throw new Error('Invalid QR code: No badge ID found');
+      }
+
+      // Perform check-in with the real API
+      await performCheckIn(badgeId);
+    } catch (error: any) {
+      console.error('QR code scan error:', error);
       setIsError(true);
       setScanResult(null);
       setShowResult(true);
+    } finally {
+      // Always reset the scanning ref when done
+      scanningRef.current = false;
     }
   };
 
-  const performCheckIn = async (attendee: AttendeeData) => {
+  const performCheckIn = async (badgeId: string) => {
+    if (!accessToken || !selectedEvent || !selectedEntrance) {
+      Alert.alert('Error', 'Missing authentication or event/entrance data');
+      setScanned(false);
+      return;
+    }
+
     try {
-      // Check if attendee is already checked in
-      const existingCheckIn = await AsyncStorage.getItem(
-        `checkin_${attendee.id}`
+      // Call the real API to check in the attendee
+      const response = await attendeesApi.checkIn(
+        badgeId,
+        selectedEntrance.name,
+        selectedEvent.id,
+        accessToken
       );
 
-      if (existingCheckIn) {
-        // Attendee already checked in
-        const existingData = JSON.parse(existingCheckIn);
-        setPreviousEntrance(existingData.entranceName || 'Unknown entrance');
-        setScanResult({
-          ...attendee,
-          isCheckedIn: true,
-          checkInTime: existingData.checkInTime,
-        });
-        setIsError(false);
-        setShowResult(true);
+      // Handle successful check-in response
+      const attendeeData: AttendeeData = {
+        id: badgeId,
+        name: response.name || response.attendeeName || 'Unknown',
+        email: response.email || response.attendeeEmail || '',
+        ticketId: badgeId,
+        eventId: selectedEvent.id.toString(),
+        isCheckedIn: false, // This is a NEW check-in, not previously checked in
+        checkInTime: response.checkInTime || new Date().toISOString(),
+      };
 
-        // Auto-close the modal after 3 seconds
-        setTimeout(() => {
-          setShowResult(false);
-          setScanResult(null);
-          setScanned(false);
-        }, 3000);
-
-        // Single vibration for already checked in
-        Vibration.vibrate(200);
-
-        console.log(
-          `⚠️ Already checked in: ${attendee.name} at ${
-            existingData.entranceName || 'Unknown entrance'
-          }`
-        );
-        return;
-      }
-
-      // Save check-in data locally
+      // Save check-in data locally for offline reference
       const checkInData = {
-        ...attendee,
-        isCheckedIn: true,
-        checkInTime: new Date().toISOString(),
+        ...attendeeData,
         entranceId: selectedEntrance?.id,
         entranceName: selectedEntrance?.name,
+        checkedInAt: new Date().toISOString(),
       };
 
       await AsyncStorage.setItem(
-        `checkin_${attendee.id}`,
+        `checkin_${badgeId}`,
         JSON.stringify(checkInData)
       );
 
-      // Show success modal with attendee info
-      setPreviousEntrance(null); // Clear previous entrance for new check-ins
-      setScanResult(attendee);
+      // Show success modal
+      setPreviousEntrance(null);
+      setScanResult(attendeeData);
       setIsError(false);
       setShowResult(true);
 
-      // Auto-close the modal after 3 seconds and continue scanning
-      setTimeout(() => {
-        setShowResult(false);
-        setScanResult(null);
-        setScanned(false);
-      }, 3000);
-
-      // Provide haptic feedback for successful check-in
+      // Success haptic feedback
       Vibration.vibrate([100, 50, 100]);
+    } catch (error: any) {
+      console.error('Check-in API error:', error);
 
-      console.log(
-        `✅ Check-in successful: ${attendee.name} at ${selectedEntrance?.name}`
-      );
-    } catch (error) {
-      Alert.alert('Error', 'Failed to check in attendee. Please try again.');
-      setScanned(false);
-    }
-  };
+      // Handle specific API errors
+      if (
+        error.message?.includes('already checked in') ||
+        error.message?.includes('duplicate')
+      ) {
+        // Handle already checked in case
+        const attendeeData: AttendeeData = {
+          id: badgeId,
+          name: error.attendeeName || 'Unknown',
+          email: error.attendeeEmail || '',
+          ticketId: badgeId,
+          eventId: selectedEvent.id.toString(),
+          isCheckedIn: true,
+          checkInTime: error.checkInTime || new Date().toISOString(),
+        };
 
-  const checkInAttendee = async () => {
-    if (!scanResult) return;
+        setPreviousEntrance(error.previousEntrance || 'Unknown entrance');
+        setScanResult(attendeeData);
+        setIsError(false);
+        setShowResult(true);
 
-    try {
-      // Here you would normally make an API call to check in the attendee
-      // For now, we'll simulate a successful check-in
-
-      // Save check-in data locally
-      const checkInData = {
-        ...scanResult,
-        isCheckedIn: true,
-        checkInTime: new Date().toISOString(),
-        entranceId: selectedEntrance?.id,
-        entranceName: selectedEntrance?.name,
-      };
-
-      await AsyncStorage.setItem(
-        `checkin_${scanResult.id}`,
-        JSON.stringify(checkInData)
-      );
-
-      Alert.alert(
-        'Check-in Successful!',
-        `${scanResult.name} has been checked in to ${selectedEvent?.name} via ${selectedEntrance?.name} entrance`,
-        [{ text: 'OK', onPress: closeResultModal }]
-      );
-    } catch (error) {
-      Alert.alert('Error', 'Failed to check in attendee. Please try again.');
+        // Single vibration for already checked in
+        Vibration.vibrate(200);
+      } else {
+        // Handle other errors (not found, network errors, etc.)
+        setIsError(true);
+        setScanResult(null);
+        setShowResult(true);
+      }
+    } finally {
+      setProcessing(false);
     }
   };
 
@@ -220,15 +255,39 @@ export default function ScannerScreen({ navigation }: any) {
     setScanResult(null);
     setIsError(false);
     setScanned(false);
+    setProcessing(false);
     setPreviousEntrance(null);
+    setScanCooldown(false);
+    // Clear last scanned code to allow scanning again
+    setLastScannedCode(null);
+    // Reset scanning ref
+    scanningRef.current = false;
   };
 
   const toggleFlash = () => {
     setFlashOn(!flashOn);
   };
 
+  const getHeaderBackgroundStyle = (event: any) => {
+    const checkedInCount = event.checkedInCount || 0;
+    const capacity = event.attendeeLimit || selectedEntrance?.maxCapacity || 0;
+
+    if (capacity === 0) {
+      return { backgroundColor: '#1D4ED8' }; // Default blue if no capacity data
+    }
+
+    const capacityRate = (checkedInCount / capacity) * 100;
+
+    if (capacityRate >= 90) {
+      return { backgroundColor: '#DC2626' };
+    } else if (capacityRate >= 70) {
+      return { backgroundColor: '#EA580C' };
+    } else {
+      return { backgroundColor: '#16A34A' };
+    }
+  };
+
   if (!permission) {
-    // Camera permissions are still loading
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.centerContent}>
@@ -239,7 +298,6 @@ export default function ScannerScreen({ navigation }: any) {
   }
 
   if (!permission.granted) {
-    // Camera permissions are not granted yet
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.centerContent}>
@@ -262,17 +320,20 @@ export default function ScannerScreen({ navigation }: any) {
     <SafeAreaView style={styles.container}>
       {/* Event & Entrance Info Header */}
       {selectedEvent && selectedEntrance && (
-        <View style={styles.eventHeader}>
+        <View
+          style={[styles.eventHeader, getHeaderBackgroundStyle(selectedEvent)]}
+        >
           <Text style={styles.eventName}>{selectedEvent.name}</Text>
           <Text style={styles.eventStats}>
-            {selectedEvent.registered} registered • {selectedEvent.checkedIn}{' '}
-            checked in
+            {selectedEvent.registeredCount || 0} registered •{' '}
+            {selectedEvent.checkedInCount || 0} checked in
           </Text>
           <View style={styles.entranceInfo}>
             <Ionicons name="location-outline" size={16} color="#FDE68A" />
             <Text style={styles.entranceName}>{selectedEntrance.name}</Text>
             <Text style={styles.entranceCapacity}>
-              • Capacity: {selectedEntrance.maxCapacity}
+              • Capacity:{' '}
+              {selectedEvent.attendeeLimit || selectedEntrance.maxCapacity || 0}
             </Text>
           </View>
         </View>
@@ -287,7 +348,9 @@ export default function ScannerScreen({ navigation }: any) {
           barcodeScannerSettings={{
             barcodeTypes: ['qr'],
           }}
-          onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
+          onBarcodeScanned={
+            scanned || processing ? undefined : handleBarCodeScanned
+          }
         />
 
         {/* Overlay */}
@@ -303,7 +366,9 @@ export default function ScannerScreen({ navigation }: any) {
         {/* Instructions */}
         <View style={styles.instructionsContainer}>
           <Text style={styles.instructionsText}>
-            Position the QR code within the frame to scan
+            {processing
+              ? 'Processing QR code...'
+              : 'Position the QR code within the frame to scan'}
           </Text>
         </View>
 
@@ -320,8 +385,14 @@ export default function ScannerScreen({ navigation }: any) {
 
           <TouchableOpacity
             style={styles.controlButton}
-            onPress={() => setScanned(false)}
-            disabled={!scanned}
+            onPress={() => {
+              setScanned(false);
+              setProcessing(false);
+              setLastScannedCode(null);
+              setScanCooldown(false);
+              scanningRef.current = false;
+            }}
+            disabled={!scanned && !processing}
           >
             <Ionicons name="refresh-outline" size={24} color="white" />
             <Text style={styles.controlButtonText}>Scan Again</Text>
@@ -329,7 +400,6 @@ export default function ScannerScreen({ navigation }: any) {
         </View>
       </View>
 
-      {/* Result Modal */}
       <Modal
         animationType="slide"
         transparent={true}
@@ -341,16 +411,25 @@ export default function ScannerScreen({ navigation }: any) {
             {isError ? (
               <>
                 <Ionicons name="close-circle" size={64} color="#EF4444" />
-                <Text style={styles.modalTitle}>Invalid QR Code</Text>
+                <Text style={styles.modalTitle}>Check-in Failed</Text>
                 <Text style={styles.modalMessage}>
-                  This QR code is not valid for the selected event.
+                  Unable to check in this attendee. The badge ID may be invalid
+                  or the attendee may not be registered for this event.
                 </Text>
-                <TouchableOpacity
-                  style={[styles.modalButton, styles.errorButton]}
-                  onPress={closeResultModal}
-                >
-                  <Text style={styles.modalButtonText}>Try Again</Text>
-                </TouchableOpacity>
+                <View style={styles.modalButtons}>
+                  <TouchableOpacity
+                    style={[styles.modalButton, styles.errorButton]}
+                    onPress={closeResultModal}
+                  >
+                    <Text style={styles.modalButtonText}>Try Again</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.modalButton, styles.cancelButton]}
+                    onPress={() => navigation.goBack()}
+                  >
+                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
               </>
             ) : (
               scanResult && (
@@ -394,8 +473,23 @@ export default function ScannerScreen({ navigation }: any) {
                   </View>
 
                   <Text style={styles.autoCloseMessage}>
-                    Continuing scan automatically...
+                    Tap "Scan Again" to continue scanning
                   </Text>
+
+                  <View style={styles.modalButtons}>
+                    <TouchableOpacity
+                      style={[styles.modalButton, styles.checkInButton]}
+                      onPress={closeResultModal}
+                    >
+                      <Text style={styles.modalButtonText}>Scan Again</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.modalButton, styles.cancelButton]}
+                      onPress={() => navigation.goBack()}
+                    >
+                      <Text style={styles.cancelButtonText}>Done</Text>
+                    </TouchableOpacity>
+                  </View>
                 </>
               )
             )}
@@ -643,6 +737,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 16,
     fontStyle: 'italic',
+    marginBottom: 16,
   },
   alreadyCheckedInText: {
     color: '#F59E0B',

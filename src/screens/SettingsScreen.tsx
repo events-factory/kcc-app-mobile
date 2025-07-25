@@ -11,11 +11,31 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAuth } from '../context/AuthContext';
 
 export default function SettingsScreen({ navigation }: any) {
   const [vibrationEnabled, setVibrationEnabled] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
+  const { user, logout } = useAuth();
+
+  const handleLogout = () => {
+    Alert.alert('Logout', 'Are you sure you want to logout?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Logout',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await logout();
+          } catch (error) {
+            console.error('Logout error:', error);
+            Alert.alert('Error', 'Failed to logout. Please try again.');
+          }
+        },
+      },
+    ]);
+  };
 
   const clearAllData = () => {
     Alert.alert(
@@ -97,8 +117,10 @@ export default function SettingsScreen({ navigation }: any) {
               <Ionicons name="person" size={32} color="white" />
             </View>
             <View style={styles.profileInfo}>
-              <Text style={styles.profileName}>Admin User</Text>
-              <Text style={styles.profileEmail}>admin@kccevents.com</Text>
+              <Text style={styles.profileName}>{user?.name || 'User'}</Text>
+              <Text style={styles.profileEmail}>
+                {user?.email || 'user@example.com'}
+              </Text>
             </View>
             <TouchableOpacity style={styles.editProfileButton}>
               <Ionicons name="pencil" size={16} color="#2563EB" />
@@ -217,15 +239,7 @@ export default function SettingsScreen({ navigation }: any) {
 
         {/* Sign Out */}
         <View style={styles.section}>
-          <TouchableOpacity
-            style={styles.signOutButton}
-            onPress={() => {
-              Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Sign Out', style: 'destructive' },
-              ]);
-            }}
-          >
+          <TouchableOpacity style={styles.signOutButton} onPress={handleLogout}>
             <Ionicons name="log-out-outline" size={20} color="#EF4444" />
             <Text style={styles.signOutText}>Sign Out</Text>
           </TouchableOpacity>

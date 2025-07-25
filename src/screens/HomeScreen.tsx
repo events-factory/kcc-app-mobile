@@ -11,107 +11,117 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAuth } from '../context/AuthContext';
+import { eventsApi } from '../services/api';
 
 interface Event {
   id: string;
   name: string;
+  description?: string;
+  startDate: string;
+  endDate: string;
+  location?: string;
   attendeeLimit: number;
-  registered: number;
-  checkedIn: number;
-  checkInRate: number;
-}
-
-interface Entrance {
-  id: string;
-  name: string;
-  maxCapacity: string;
-  isActive: boolean;
+  registeredCount?: number;
+  checkedInCount?: number;
+  checkInRate?: number;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export default function HomeScreen({ navigation }: any) {
-  const [events, setEvents] = useState<Event[]>([
-    {
-      id: '1',
-      name: 'KCC Annual Conference 2025',
-      attendeeLimit: 300,
-      registered: 85,
-      checkedIn: 0,
-      checkInRate: 0,
-    },
-    {
-      id: '2',
-      name: 'KCC Developer Workshop',
-      attendeeLimit: 150,
-      registered: 76,
-      checkedIn: 0,
-      checkInRate: 0,
-    },
-  ]);
-
-  const [entrances, setEntrances] = useState<Entrance[]>([
-    {
-      id: '5',
-      name: 'Filini',
-      maxCapacity: 'No limit',
-      isActive: true,
-    },
-    {
-      id: '6',
-      name: 'Main Hall Entrance',
-      maxCapacity: '500',
-      isActive: true,
-    },
-    {
-      id: '7',
-      name: 'VIP Entrance',
-      maxCapacity: '50',
-      isActive: true,
-    },
-    {
-      id: '8',
-      name: 'Staff Entrance',
-      maxCapacity: '100',
-      isActive: false,
-    },
-  ]);
-
+  const { user, accessToken } = useAuth();
+  const [events, setEvents] = useState<Event[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
-  const [selectedEntrance, setSelectedEntrance] = useState<Entrance | null>(
-    null
-  );
   const [refreshing, setRefreshing] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadSelectedEvent();
-    loadSelectedEntrance();
+    fetchEvents();
   }, []);
+
+  const fetchEvents = async () => {
+    if (!accessToken) {
+      console.error('No access token available in HomeScreen');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      
+
+      const eventsData = await eventsApi.getAll(accessToken);
+     
+
+      // Calculate check-in rates for each event (against max capacity)
+      const eventsWithRates = eventsData.map((event: Event) => {
+        const attendeeLimit = event.attendeeLimit || 0;
+        const checkedInCount = event.checkedInCount || 0;
+        const checkInRate =
+          attendeeLimit > 0
+            ? Math.round((checkedInCount / attendeeLimit) * 100)
+            : 0;
+
+        return {
+          ...event,
+          checkInRate,
+        };
+      });
+
+      setEvents(eventsWithRates);
+    } catch (error: any) {
+      console.error('HomeScreen: Error fetching events:', error);
+      Alert.alert('Error', 'Failed to load events. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadSelectedEvent = async () => {
     try {
       const eventData = await AsyncStorage.getItem('selectedEvent');
       if (eventData) {
-        setSelectedEvent(JSON.parse(eventData));
+        const event = JSON.parse(eventData);
+
+        // Recalculate check-in rate in case it wasn't calculated before (against max capacity)
+        const attendeeLimit = event.attendeeLimit || 0;
+        const checkedInCount = event.checkedInCount || 0;
+        const checkInRate =
+          attendeeLimit > 0
+            ? Math.round((checkedInCount / attendeeLimit) * 100)
+            : 0;
+
+        setSelectedEvent({
+          ...event,
+          checkInRate,
+        });
       }
     } catch (error) {
       console.error('Error loading selected event:', error);
     }
   };
 
-  const loadSelectedEntrance = async () => {
-    try {
-      const entranceData = await AsyncStorage.getItem('selectedEntrance');
-      if (entranceData) {
-        setSelectedEntrance(JSON.parse(entranceData));
-      }
-    } catch (error) {
-      console.error('Error loading selected entrance:', error);
-    }
-  };
-
   const selectEvent = async (event: Event) => {
     try {
-      await AsyncStorage.setItem('selectedEvent', JSON.stringify(event));
-      setSelectedEvent(event);
+      // Ensure the event has the correct check-in rate calculated (against max capacity)
+      const attendeeLimit = event.attendeeLimit || 0;
+      const checkedInCount = event.checkedInCount || 0;
+      const checkInRate =
+        attendeeLimit > 0
+          ? Math.round((checkedInCount / attendeeLimit) * 100)
+          : 0;
+
+      const eventWithRate = {
+        ...event,
+        checkInRate,
+      };
+
+      await AsyncStorage.setItem(
+        'selectedEvent',
+        JSON.stringify(eventWithRate)
+      );
+      setSelectedEvent(eventWithRate);
       Alert.alert(
         'Event Selected',
         `${event.name} is now active for scanning.`
@@ -124,37 +134,21 @@ export default function HomeScreen({ navigation }: any) {
   const deselectEvent = async () => {
     try {
       await AsyncStorage.removeItem('selectedEvent');
-      await AsyncStorage.removeItem('selectedEntrance');
       setSelectedEvent(null);
-      setSelectedEntrance(null);
       Alert.alert(
-        'Selections Cleared',
-        'No event or entrance is currently active for scanning.'
+        'Selection Cleared',
+        'No event is currently active for scanning.'
       );
     } catch (error) {
-      console.error('Error removing selections:', error);
-    }
-  };
-
-  const selectEntrance = async (entrance: Entrance) => {
-    try {
-      await AsyncStorage.setItem('selectedEntrance', JSON.stringify(entrance));
-      setSelectedEntrance(entrance);
-      Alert.alert(
-        'Entrance Selected',
-        `${entrance.name} is now active for scanning.`
-      );
-    } catch (error) {
-      console.error('Error saving selected entrance:', error);
+      console.error('Error removing selection:', error);
     }
   };
 
   const onRefresh = () => {
     setRefreshing(true);
-    // Simulate API call
-    setTimeout(() => {
+    fetchEvents().finally(() => {
       setRefreshing(false);
-    }, 1000);
+    });
   };
 
   const startScanning = () => {
@@ -162,13 +156,6 @@ export default function HomeScreen({ navigation }: any) {
       Alert.alert(
         'No Event Selected',
         'Please select an event before scanning.'
-      );
-      return;
-    }
-    if (!selectedEntrance) {
-      Alert.alert(
-        'No Entrance Selected',
-        'Please select an entrance before scanning.'
       );
       return;
     }
@@ -189,7 +176,7 @@ export default function HomeScreen({ navigation }: any) {
             <View>
               <Text style={styles.headerTitle}>KCC Events</Text>
               <Text style={styles.headerSubtitle}>
-                Signed in as: admin@kccevents.com
+                Signed in as: {user?.email || 'user@example.com'}
               </Text>
             </View>
             <TouchableOpacity
@@ -201,6 +188,13 @@ export default function HomeScreen({ navigation }: any) {
           </View>
         </View>
 
+        {/* Loading State */}
+        {loading && (
+          <View style={styles.loadingContainer}>
+            <Text style={styles.loadingText}>Loading events...</Text>
+          </View>
+        )}
+
         {/* Active Event Card */}
         {selectedEvent && (
           <View style={styles.activeEventCard}>
@@ -210,46 +204,29 @@ export default function HomeScreen({ navigation }: any) {
             </View>
             <Text style={styles.activeEventTitle}>{selectedEvent.name}</Text>
             <Text style={styles.activeEventStats}>
-              {selectedEvent.registered} registered • {selectedEvent.checkedIn}{' '}
-              checked in
-            </Text>
-          </View>
-        )}
-
-        {/* Active Entrance Card */}
-        {selectedEntrance && (
-          <View style={styles.activeEntranceCard}>
-            <View style={styles.activeEntranceHeader}>
-              <Ionicons name="radio-button-on" size={16} color="#F59E0B" />
-              <Text style={styles.activeEntranceLabel}>Active Entrance</Text>
-            </View>
-            <Text style={styles.activeEntranceTitle}>
-              {selectedEntrance.name}
-            </Text>
-            <Text style={styles.activeEntranceStats}>
-              Capacity: {selectedEntrance.maxCapacity} • Status:{' '}
-              {selectedEntrance.isActive ? 'Active' : 'Inactive'}
+              {selectedEvent.checkedInCount || 0} of{' '}
+              {selectedEvent.attendeeLimit || 0} capacity •{' '}
+              {selectedEvent.registeredCount || 0} registered •{' '}
+              {selectedEvent.checkInRate || 0}% filled
             </Text>
           </View>
         )}
 
         {/* Clear Selection Button */}
-        {(selectedEvent || selectedEntrance) && (
+        {selectedEvent && (
           <View style={styles.scanButtonContainer}>
             <TouchableOpacity
               onPress={deselectEvent}
               style={styles.clearSelectionButtonMain}
             >
               <Ionicons name="close-circle-outline" size={20} color="#EF4444" />
-              <Text style={styles.clearSelectionTextMain}>
-                Clear All Selections
-              </Text>
+              <Text style={styles.clearSelectionTextMain}>Clear Selection</Text>
             </TouchableOpacity>
           </View>
         )}
 
         {/* Start Scanning Button */}
-        {selectedEvent && selectedEntrance && (
+        {selectedEvent && (
           <View style={styles.scanButtonContainer}>
             <TouchableOpacity onPress={startScanning} style={styles.scanButton}>
               <Ionicons name="qr-code-outline" size={20} color="white" />
@@ -262,113 +239,93 @@ export default function HomeScreen({ navigation }: any) {
         <View style={styles.eventsContainer}>
           <Text style={styles.eventsTitle}>Events</Text>
 
-          {events.map((event) => (
-            <TouchableOpacity
-              key={event.id}
-              onPress={() => selectEvent(event)}
-              style={[
-                styles.eventCard,
-                selectedEvent?.id === event.id && styles.selectedEventCard,
-              ]}
-            >
-              <View style={styles.eventHeader}>
-                <Text style={styles.eventTitle}>{event.name}</Text>
-                {selectedEvent?.id === event.id && (
-                  <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                )}
-              </View>
-
-              <View style={styles.eventStats}>
-                <View style={styles.eventStatsLeft}>
-                  <View style={styles.statRow}>
-                    <Ionicons name="people-outline" size={16} color="#6B7280" />
-                    <Text style={styles.statText}>
-                      Total Attendees: {event.registered}
-                    </Text>
-                  </View>
-                  <View style={styles.statRow}>
-                    <Ionicons
-                      name="person-add-outline"
-                      size={16}
-                      color="#6B7280"
-                    />
-                    <Text style={styles.statText}>
-                      Checked In: {event.checkedIn}
-                    </Text>
-                  </View>
-                </View>
-
-                <View style={styles.checkInRate}>
-                  <Text style={styles.checkInRateNumber}>
-                    {event.checkInRate}%
-                  </Text>
-                  <Text style={styles.checkInRateLabel}>Check-in Rate</Text>
-                </View>
-              </View>
-
+          {events.length === 0 && !loading ? (
+            <View style={styles.emptyState}>
+              <Ionicons name="calendar-outline" size={48} color="#9CA3AF" />
+              <Text style={styles.emptyStateText}>No events available</Text>
+              <Text style={styles.emptyStateSubtext}>
+                Events will appear here when they are created
+              </Text>
+            </View>
+          ) : (
+            events.map((event) => (
               <TouchableOpacity
-                onPress={() => navigation.navigate('EventDetail', { event })}
-                style={styles.viewDetailsButton}
+                key={event.id}
+                onPress={() => selectEvent(event)}
+                style={[
+                  styles.eventCard,
+                  selectedEvent?.id === event.id && styles.selectedEventCard,
+                ]}
               >
-                <Text style={styles.viewDetailsText}>View Details</Text>
-                <Ionicons name="chevron-forward" size={16} color="#2563EB" />
-              </TouchableOpacity>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Entrances List */}
-        <View style={styles.eventsContainer}>
-          <Text style={styles.eventsTitle}>Entrance Management</Text>
-
-          {entrances.map((entrance) => (
-            <TouchableOpacity
-              key={entrance.id}
-              onPress={() => selectEntrance(entrance)}
-              style={[
-                styles.eventCard,
-                selectedEntrance?.id === entrance.id &&
-                  styles.selectedEntranceCard,
-              ]}
-            >
-              <View style={styles.eventHeader}>
-                <Text style={styles.eventTitle}>{entrance.name}</Text>
-                {selectedEntrance?.id === entrance.id && (
-                  <Ionicons name="checkmark-circle" size={20} color="#F59E0B" />
-                )}
-              </View>
-
-              <View style={styles.eventStats}>
-                <View style={styles.eventStatsLeft}>
-                  <View style={styles.statRow}>
-                    <Ionicons name="resize-outline" size={16} color="#6B7280" />
-                    <Text style={styles.statText}>
-                      Max Capacity: {entrance.maxCapacity}
-                    </Text>
-                  </View>
-                  <View style={styles.statRow}>
+                <View style={styles.eventHeader}>
+                  <Text style={styles.eventTitle}>{event.name}</Text>
+                  {selectedEvent?.id === event.id && (
                     <Ionicons
-                      name={
-                        entrance.isActive
-                          ? 'checkmark-circle-outline'
-                          : 'close-circle-outline'
-                      }
-                      size={16}
-                      color={entrance.isActive ? '#10B981' : '#EF4444'}
+                      name="checkmark-circle"
+                      size={20}
+                      color="#10B981"
                     />
-                    <Text style={styles.statText}>
-                      Status: {entrance.isActive ? 'Active' : 'Inactive'}
+                  )}
+                </View>
+
+                {event.description && (
+                  <Text style={styles.eventDescription}>
+                    {event.description}
+                  </Text>
+                )}
+
+                <View style={styles.eventStats}>
+                  <View style={styles.eventStatsLeft}>
+                    <View style={styles.statRow}>
+                      <Ionicons
+                        name="people-outline"
+                        size={16}
+                        color="#6B7280"
+                      />
+                      <Text style={styles.statText}>
+                        Total Attendees: {event.registeredCount || 0}
+                      </Text>
+                    </View>
+                    <View style={styles.statRow}>
+                      <Ionicons
+                        name="person-add-outline"
+                        size={16}
+                        color="#6B7280"
+                      />
+                      <Text style={styles.statText}>
+                        Checked In: {event.checkedInCount || 0}
+                      </Text>
+                    </View>
+                    <View style={styles.statRow}>
+                      <Ionicons
+                        name="calendar-outline"
+                        size={16}
+                        color="#6B7280"
+                      />
+                      <Text style={styles.statText}>
+                        Date: {new Date(event.startDate).toLocaleDateString()}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.checkInRate}>
+                    <Text style={styles.checkInRateNumber}>
+                      {event.checkInRate || 0}%
                     </Text>
+                    <Text style={styles.checkInRateLabel}>Capacity Filled</Text>
                   </View>
                 </View>
 
-                <View style={styles.checkInRate}>
-                  <Text style={styles.checkInRateNumber}>ID</Text>
-                  <Text style={styles.checkInRateLabel}>{entrance.id}</Text>
-                </View>
-              </View>
-            </TouchableOpacity>
-          ))}
+                <TouchableOpacity
+                  onPress={() => navigation.navigate('EventDetail', { event })}
+                  style={styles.viewDetailsButton}
+                >
+                  <Text style={styles.viewDetailsText}>View Details</Text>
+                  <Ionicons name="chevron-forward" size={16} color="#2563EB" />
+                </TouchableOpacity>
+              </TouchableOpacity>
+            ))
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -603,5 +560,35 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 16,
     marginLeft: 8,
+  },
+  loadingContainer: {
+    padding: 32,
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#6B7280',
+    fontSize: 16,
+  },
+  emptyState: {
+    padding: 32,
+    alignItems: 'center',
+  },
+  emptyStateText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#374151',
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  emptyStateSubtext: {
+    fontSize: 14,
+    color: '#6B7280',
+    textAlign: 'center',
+  },
+  eventDescription: {
+    fontSize: 14,
+    color: '#6B7280',
+    marginBottom: 12,
+    lineHeight: 20,
   },
 });
