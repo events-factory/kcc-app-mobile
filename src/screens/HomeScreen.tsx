@@ -7,12 +7,13 @@ import {
   RefreshControl,
   Alert,
   StyleSheet,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../context/AuthContext';
-import { eventsApi } from '../services/api';
+import { eventsApi, entrancesApi } from '../services/api';
 
 interface Event {
   id: string;
@@ -29,12 +30,23 @@ interface Event {
   updatedAt?: string;
 }
 
+interface Entrance {
+  id: number;
+  name: string;
+  maxCapacity: number;
+  eventId: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export default function HomeScreen({ navigation }: any) {
   const { user, accessToken } = useAuth();
   const [events, setEvents] = useState<Event[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
+  const [entrances, setEntrances] = useState<Entrance[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [showEntranceModal, setShowEntranceModal] = useState(false);
 
   useEffect(() => {
     loadSelectedEvent();
@@ -49,10 +61,8 @@ export default function HomeScreen({ navigation }: any) {
 
     try {
       setLoading(true);
-      
 
       const eventsData = await eventsApi.getAll(accessToken);
-     
 
       // Calculate check-in rates for each event (against max capacity)
       const eventsWithRates = eventsData.map((event: Event) => {
@@ -92,13 +102,36 @@ export default function HomeScreen({ navigation }: any) {
             ? Math.round((checkedInCount / attendeeLimit) * 100)
             : 0;
 
-        setSelectedEvent({
+        const selectedEventWithRate = {
           ...event,
           checkInRate,
-        });
+        };
+
+        setSelectedEvent(selectedEventWithRate);
+
+        // Fetch entrances for the selected event
+        await fetchEntrances(selectedEventWithRate);
       }
     } catch (error) {
       console.error('Error loading selected event:', error);
+    }
+  };
+
+  const fetchEntrances = async (event: Event) => {
+    if (!accessToken || !event) {
+      return;
+    }
+
+    try {
+      const entrancesData = await entrancesApi.getByEvent(
+        Number(event.id),
+        accessToken
+      );
+      setEntrances(entrancesData);
+    } catch (error: any) {
+      console.error('Error fetching entrances:', error);
+      // Don't show alert for entrance errors, just set empty array
+      setEntrances([]);
     }
   };
 
@@ -122,6 +155,10 @@ export default function HomeScreen({ navigation }: any) {
         JSON.stringify(eventWithRate)
       );
       setSelectedEvent(eventWithRate);
+
+      // Fetch entrances for the newly selected event
+      await fetchEntrances(eventWithRate);
+
       Alert.alert(
         'Event Selected',
         `${event.name} is now active for scanning.`
@@ -135,6 +172,7 @@ export default function HomeScreen({ navigation }: any) {
     try {
       await AsyncStorage.removeItem('selectedEvent');
       setSelectedEvent(null);
+      setEntrances([]); // Clear entrances when deselecting event
       Alert.alert(
         'Selection Cleared',
         'No event is currently active for scanning.'
@@ -159,7 +197,34 @@ export default function HomeScreen({ navigation }: any) {
       );
       return;
     }
-    navigation.navigate('Scanner');
+
+    if (entrances.length === 0) {
+      Alert.alert(
+        'No Entrances Available',
+        'No entrances have been configured for this event. Please add entrances first.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    if (entrances.length === 1) {
+      // If only one entrance, go directly to scanner
+      navigation.navigate('Scanner', {
+        entrance: entrances[0],
+        event: selectedEvent,
+      });
+    } else {
+      // If multiple entrances, show selection modal
+      setShowEntranceModal(true);
+    }
+  };
+
+  const selectEntrance = (entrance: Entrance) => {
+    setShowEntranceModal(false);
+    navigation.navigate('Scanner', {
+      entrance: entrance,
+      event: selectedEvent,
+    });
   };
 
   return (
@@ -197,7 +262,12 @@ export default function HomeScreen({ navigation }: any) {
 
         {/* Active Event Card */}
         {selectedEvent && (
-          <View style={styles.activeEventCard}>
+          <TouchableOpacity
+            onPress={() =>
+              navigation.navigate('EventDetail', { event: selectedEvent })
+            }
+            style={styles.activeEventCard}
+          >
             <View style={styles.activeEventHeader}>
               <Ionicons name="radio-button-on" size={16} color="#10B981" />
               <Text style={styles.activeEventLabel}>Active Event</Text>
@@ -209,7 +279,7 @@ export default function HomeScreen({ navigation }: any) {
               {selectedEvent.registeredCount || 0} registered •{' '}
               {selectedEvent.checkInRate || 0}% filled
             </Text>
-          </View>
+          </TouchableOpacity>
         )}
 
         {/* Clear Selection Button */}
@@ -328,6 +398,67 @@ export default function HomeScreen({ navigation }: any) {
           )}
         </View>
       </ScrollView>
+
+      {/* Entrance Selection Modal */}
+      <Modal
+        visible={showEntranceModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowEntranceModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Select Entrance</Text>
+              <TouchableOpacity
+                onPress={() => setShowEntranceModal(false)}
+                style={styles.closeButton}
+              >
+                <Ionicons name="close" size={24} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalSubtitle}>
+              Choose an entrance to start scanning for check-ins
+            </Text>
+
+            <ScrollView style={styles.entranceList}>
+              {entrances.map((entrance) => (
+                <TouchableOpacity
+                  key={entrance.id}
+                  style={styles.entranceOption}
+                  onPress={() => selectEntrance(entrance)}
+                >
+                  <View style={styles.entranceOptionContent}>
+                    <View style={styles.entranceOptionHeader}>
+                      <Text style={styles.entranceOptionName}>
+                        {entrance.name}
+                      </Text>
+                      <View style={styles.entranceOptionCapacity}>
+                        <Ionicons name="people" size={16} color="#2563EB" />
+                        <Text style={styles.entranceOptionCapacityText}>
+                          {entrance.maxCapacity}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.entranceOptionId}>
+                      Entrance ID: {entrance.id}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color="#6B7280" />
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={() => setShowEntranceModal(false)}
+            >
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -590,5 +721,100 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     marginBottom: 12,
     lineHeight: 20,
+  },
+
+  // Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    margin: 20,
+    padding: 20,
+    borderRadius: 12,
+    maxHeight: '80%',
+    width: '90%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#111827',
+  },
+  closeButton: {
+    padding: 4,
+  },
+  modalSubtitle: {
+    fontSize: 16,
+    color: '#6B7280',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  entranceList: {
+    maxHeight: 300,
+  },
+  entranceOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    marginBottom: 12,
+    backgroundColor: '#F9FAFB',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  entranceOptionContent: {
+    flex: 1,
+  },
+  entranceOptionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  entranceOptionName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#111827',
+    flex: 1,
+  },
+  entranceOptionCapacity: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  entranceOptionCapacityText: {
+    fontSize: 14,
+    color: '#2563EB',
+    fontWeight: '500',
+    marginLeft: 4,
+  },
+  entranceOptionId: {
+    fontSize: 14,
+    color: '#6B7280',
+  },
+  cancelButton: {
+    marginTop: 16,
+    padding: 16,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  cancelButtonText: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#6B7280',
   },
 });
